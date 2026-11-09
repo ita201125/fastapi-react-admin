@@ -31,6 +31,7 @@ import { COLUMN_LABELS, buildColumns } from './columns'
 import { features } from './table-features'
 import { UserFormSheet } from './form'
 import { UserSecuritySheet } from './security-sheet'
+import { DataChangeSheet } from '../_shared/data-change/history-sheet'
 import { DEFAULT_PAGE_SIZE } from '../_shared/pagination'
 import { ExportButton } from '../_shared/data-io/export-button'
 import { ImportSheet } from '../_shared/data-io/import-sheet'
@@ -196,6 +197,7 @@ export function UserPage({
   // 只存 id，用户对象每次从最新的 rows 里取 —— 存快照的话，
   // 切换权限后列表已经 refetch 了，抽屉里的开关还显示旧值（实测踩过）
   const [securityId, setSecurityId] = React.useState<string | null>(null)
+  const [historyOf, setHistoryOf] = React.useState<User | null>(null)
   const [bulkOpen, setBulkOpen] = React.useState(false)
   const [importOpen, setImportOpen] = React.useState(false)
   const del = useDeleteUser()
@@ -207,7 +209,7 @@ export function UserPage({
   }, [])
 
   const columns = React.useMemo(
-    () => buildColumns(handleEdit, setPendingDelete, (u) => setSecurityId(u.id), t),
+    () => buildColumns(handleEdit, setPendingDelete, (u) => setSecurityId(u.id), setHistoryOf, t),
     [handleEdit, t]
   )
 
@@ -366,20 +368,26 @@ export function UserPage({
         onOpenChange={(o) => !o && setSecurityId(null)}
         user={rows.find((r) => r.id === securityId) ?? null}
       />
+      <DataChangeSheet
+        entity="user"
+        entityId={historyOf?.id ?? null}
+        name={historyOf?.username}
+        open={historyOf !== null}
+        onOpenChange={(o) => !o && setHistoryOf(null)}
+      />
 
       <ConfirmDialog
         open={pendingDelete !== null}
         onOpenChange={(o) => !o && setPendingDelete(null)}
         title={t('删除用户')}
         description={
-          deleteError ? (
-            <span className="text-destructive">{deleteError}</span>
-          ) : pendingDelete ? (
+          pendingDelete ? (
             t('确定删除「{{who}}」吗？此操作不可撤销。', {
               who: pendingDelete.nickname || pendingDelete.username,
             })
           ) : ''
         }
+        error={deleteError}
         confirmText={t('删除')}
         destructive
         pending={del.isPending}

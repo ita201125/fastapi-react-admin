@@ -5,6 +5,7 @@ import {
   IconChevronRight,
   IconChevronsDown,
   IconChevronsUp,
+  IconHistory,
   IconPencil,
   IconPlus,
   IconTrash,
@@ -32,6 +33,7 @@ import { ExportButton } from '../_shared/data-io/export-button'
 import { ImportSheet } from '../_shared/data-io/import-sheet'
 import { deptKeys, deptTreeQuery, useDeleteDept, type Dept } from './api'
 import { DeptFormSheet } from './form'
+import { DataChangeSheet } from '../_shared/data-change/history-sheet'
 import { ListBody, PageShell } from '../_shared/page-shell'
 
 /**
@@ -69,6 +71,7 @@ export function DeptPage({
 
   const [sheetOpen, setSheetOpen] = React.useState(false)
   const [editing, setEditing] = React.useState<Dept | null>(null)
+  const [historyOf, setHistoryOf] = React.useState<Dept | null>(null)
   const [presetParent, setPresetParent] = React.useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = React.useState<Dept | null>(null)
   const [importOpen, setImportOpen] = React.useState(false)
@@ -76,6 +79,7 @@ export function DeptPage({
   const [deleteError, setDeleteError] = React.useState<string | null>(null)
   React.useEffect(() => setDeleteError(null), [pendingDelete])
   const del = useDeleteDept()
+  const pendingKids = pendingDelete?.children?.length ?? 0
 
   const foldAll = search.fold === 'all'
   const { isOpen, toggle } = useTreeFold(foldAll)
@@ -194,7 +198,7 @@ export function DeptPage({
                   <DeptRows
                     key={d.id} node={d} depth={0} isOpen={isOpen}
                     onToggle={toggle} onEdit={openEdit} onAddChild={openCreate}
-                    onDelete={setPendingDelete}
+                    onHistory={setHistoryOf} onDelete={setPendingDelete}
                   />
                 ))
               )}
@@ -206,6 +210,10 @@ export function DeptPage({
       <DeptFormSheet
         open={sheetOpen} onOpenChange={setSheetOpen}
         editing={editing} presetParentId={presetParent} tree={tree}
+      />
+      <DataChangeSheet
+        entity="dept" entityId={historyOf?.id ?? null} name={historyOf?.name}
+        open={historyOf !== null} onOpenChange={(o) => !o && setHistoryOf(null)}
       />
 
       <ImportSheet
@@ -225,12 +233,16 @@ export function DeptPage({
         onOpenChange={(o) => !o && setPendingDelete(null)}
         title={t("删除部门")}
         description={
-          deleteError ? (
-            <span className="text-destructive">{deleteError}</span>
-          ) : pendingDelete ? (
-            t('确定删除「{{name}}」吗？若该部门下仍有子部门或用户，后端会拒绝。', { name: pendingDelete.name })
-          ) : ''
+          !pendingDelete ? '' : pendingKids > 0 ? (
+            // 树上已经看得见子部门：这一步一定会被拒，直接说怎么办，不让人点了再碰壁。
+            // 反过来不成立 —— 筛选过的树可能没带上子部门，成员数前端也不知道，那两种留给接口说
+            t('「{{name}}」下还有 {{n}} 个子部门，要先删掉或移到别的部门下，才能删除它。', { name: pendingDelete.name, n: pendingKids })
+          ) : (
+            t('确定删除「{{name}}」吗？部门下还有成员时不能删除，要先把他们调到别的部门。', { name: pendingDelete.name })
+          )
         }
+        error={deleteError}
+        blocked={pendingKids > 0}
         confirmText={t("删除")} destructive pending={del.isPending}
         onConfirm={async () => {
           if (!pendingDelete) return
@@ -250,7 +262,7 @@ export function DeptPage({
 }
 
 function DeptRows({
-  node, depth, isOpen, onToggle, onEdit, onAddChild, onDelete,
+  node, depth, isOpen, onToggle, onEdit, onAddChild, onHistory, onDelete,
 }: {
   node: Dept
   depth: number
@@ -258,6 +270,8 @@ function DeptRows({
   onToggle: (id: string) => void
   onEdit: (d: Dept) => void
   onAddChild: (parentId: string) => void
+  /** 变更记录（#260） */
+  onHistory: (d: Dept) => void
   onDelete: (d: Dept) => void
 }) {
   const kids = node.children ?? []
@@ -300,6 +314,10 @@ function DeptRows({
               },
               { key: 'edit', label: t('编辑'), icon: IconPencil, perm: 'sys:dept:edit', testId: `dept-edit-${node.name}`, onClick: () => onEdit(node) },
               {
+                key: 'history', label: t('变更记录'), icon: IconHistory, perm: 'log:change:list',
+                testId: `dept-history-${node.name}`, onClick: () => onHistory(node),
+              },
+              {
                 key: 'del', label: t('删除'), icon: IconTrash, perm: 'sys:dept:del', danger: true,
                 testId: `dept-delete-${node.name}`, onClick: () => onDelete(node),
               },
@@ -311,7 +329,7 @@ function DeptRows({
       {hasKids && open &&
         kids.map((c) => (
           <DeptRows key={c.id} node={c} depth={depth + 1} isOpen={isOpen}
-                    onToggle={onToggle} onEdit={onEdit} onAddChild={onAddChild} onDelete={onDelete} />
+                    onToggle={onToggle} onEdit={onEdit} onAddChild={onAddChild} onHistory={onHistory} onDelete={onDelete} />
         ))}
     </>
   )
