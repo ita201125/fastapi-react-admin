@@ -74,6 +74,33 @@ Google 的 AI features 文档：
 - 只写 `main` 上已有的功能；不评价别的项目
 - `description` 会成为 meta description 和分享卡片的摘要，写成一两句具体的话
 
+## 功能页：固定章节 · 分组登记 · 总览和 README 同步（#285）
+
+`features/` 下每一页按这个顺序写（样板是 [`login-security.mdx`](src/content/docs/features/login-security.mdx)）。
+调研过 vben / RuoYi-Vue-Plus / FBA / Refine / react-admin 的文档站，几家都只写给开发者；
+这里同一页上半写给管理员、下半写给开发者，**不拆成两套站**（两套会各自过时）：
+
+| # | 章节 | 写什么 |
+|---|---|---|
+| 1 | 开头一段 + 首图 | 一段话说清是什么；紧跟 `ProductShot`（页面因此是 `.mdx`）。属于插件的写明插件名 |
+| 2 | 在界面上哪里找？ | 表：入口（菜单路径）· 路由 · 谁能用（**权限码**，或写明按超级管理员判）· 做什么 |
+| 3 | 若干问题式小标题 | 按管理员要完成的事组织，不按代码模块 |
+| 4 | 有哪些开关？ | **两张表**：参数配置页能改的（界面上改、不用重启）和只能 `.env` 改的。键 · 默认值 · 说明。默认值抄 `conf.py` 和参数配置的种子 SQL，别凭印象 |
+| 5 | 加 xxx / 接自己的业务要注意什么 | 扩展点；没有就写不支持 |
+| 6 | 它不做什么 | 已知限制。**核对时发现的代码缺口也写在这里**（如密码到期提醒网页端没显示），不要替代码圆 |
+| 7 | 代码在哪 · 怎么测的 | 完整 GitHub 链接（上面那道检查会核对）；测试写文件名、条数和它证明了什么 |
+| 8 | 在演示站里试试 | 推荐一条操作路径；演示站是共用的，会影响别人的操作要提醒 |
+
+🔴 **内页的顶部分类和左侧文章来自同一份登记表**：`src/navigation.mjs` 的 `DOC_SECTIONS`。
+左侧只平铺当前分类的文章；原有页面路径保持不变，不能为了分类移动内容文件，否则已有链接会 404。
+手写分类的失败方式是「新加一页忘了登记」：页面能访问、导航里没有、构建全绿。
+`astro.config.mjs` 的 `checkDocSections()` 会核对中英两份**全部文章**（首页除外）恰好登记一次，
+漏页、重复登记或缺译都会让构建失败。新增页面时同时补中英文内容和登记表。
+
+**总览页（`features/overview.md`）和 README「功能一览」逐行对应。** 改 README 那张表时一起改这里，
+和测试条数同源是同一条规矩 —— 建这条规矩时两边已经漂开了（总览漏了 MFA、会话管理、Webhook、AI 预审）。
+第二张表「在哪个菜单 / 哪个插件 / 手机 App 支持到哪」里的手机一列，要对着 `apps/mobile/src/app/` 下实际有的屏写。
+
 ## 🔴 站内链接：正文写 `/xxx/`，但组件和 frontmatter 里不行
 
 站点挂在 `/fastapi-react-admin` 子路径下，Astro 只给自己生成的链接（侧边栏、上下篇、
@@ -94,6 +121,12 @@ Google 的 AI features 文档：
 PR 的 CI（`pnpm build`）就会红。反向验证过：把一页里的一条链接改成不带 base，它报
 「没带 /fastapi-react-admin，会落到域名根上」并退出 1。外链不查（网络抖动会把它带红），
 `/e2e/` 不查（CI 的 pages job 在构建之后才拼进来）。
+
+**例外：指向本仓库 `main` 的源码链接要查**（#285）—— `github.com/yilecoding/fastapi-react-admin/blob|tree|edit/main/<路径>`
+指向的就是这份检出，离线核对 `<路径>` 在不在，不联网。功能页靠「代码在哪」那一节和代码对上，
+文件改名或挪目录之后这些链接照样 404，而原来的检查把它们当外链放过了。每页底部的「编辑此页」
+也是这种链接，所以顺带核对了每一页的源文件。2026-11-10 第一次接上时全站 422 条都有效；
+反向验证：把一页里指向 totp.py 的链接改成一个不存在的文件名，报「仓库里没有 …」并退出 1。
 
 ## 🔴 Astro 锁在 7.3.x —— 7.4 抬高了 Node 下限
 
@@ -117,11 +150,14 @@ Starlight 0.39 起不再支持 `autogenerate` 和 `label` 写在同一层。
   不套渐变面板，白底大留白 + 立体榫卯（`src/components/TenonStage.astro`）+ 几圈发丝细的同心圆，
   按钮一种墨色，技术栈是带色点的小标签。榫卯轮廓**直接 import**
   `apps/web/src/components/tenon-outline.ts`，不抄坐标 —— 改了图形，侧边栏、登录页、这里和收尾的水印一起变
-- 首页其余几块都在 `src/components/`：`SectionTitle`（左对齐标题 + 右侧「看文档」）· `Showcase`（大卡片：
-  要点 + 线稿图示）· `Diagram*`（三张 SVG 线稿）· `FeatureLine`（发丝线隔开的小功能）· `Closing`（水印 + 终端卡片）。
+- 首页其余几块都在 `src/components/`：`SectionTitle`（左对齐标题 + 右侧「看文档」）· `Showcase`（特色场景卡片）·
+  `Diagram*`（多端界面切换 / 角色范围切换 / AI 工程保障）· `FeatureLine`（发丝线隔开的小功能）· `Closing`（水印 + 终端卡片）。
   文案一律从页面的 MDX / frontmatter 传进去（`landing` 字段是 `src/content.config.ts` 里扩出来的），
   组件里不写给人看的话 —— 中英文各管各的，图示里的字也走 props
-- ⚠️ `DiagramMonorepo` 的连线是各包 `package.json` 里**真实**的 workspace 依赖，改了依赖要同步那张图
+- ⚠️ `DiagramMonorepo` 的共享包高亮是各客户端 `package.json` 里**真实**的直接 workspace 依赖，改了依赖要同步组件里的映射
+- 多端展示的 Web 画面直接用 `docs/screenshots/dashboard.png`；桌面复用该画面。手机是按
+  `apps/mobile/src/components/brand-top.tsx`、`grouped.tsx` 和原生首页还原的示意，注明非设备实拍；
+  调整这块时对照现有客户端界面与 `features/clients.md`，不要为三端杜撰同一套仪表盘
 - ⚠️ hero 的同心圆和收尾水印会伸出内容列：横向溢出裁在 `.main-frame` 上（`overflow-x: clip`）。
   裁 `html` / `body` 没用 —— 那会传给视口变成 `hidden`，实测 `scrollTo` 照样横移 230px（触屏能不能拖没测）
 - ⚠️ 只给首页加样式时选择器挂在 `:root[data-has-hero]` 上（Starlight 只给带 hero 的页加这个属性），
@@ -164,6 +200,27 @@ README、文档站首页和分享卡片（`og.png`）用的是同一批图，界
 🔴 **找页面里的元素要限定在当前页签里**（根 `CLAUDE.md` 硬纪律 5）：隐藏页签的 DOM 还在，
 实测 `getByText('部门及以下数据权限')` 命中的是角色页里那段说明文字，点了 30 秒点不动。
 按 `[data-tab="/_auth/…"]` 限定；另开新页签的页面（流程设计器）用 `[data-visible="true"]`。
+
+### 功能页首图（#285）
+
+功能页的首图也出自同一个脚本（后半段，每张一个干净会话）。除了上面的造数据，它们还要：
+
+| 图 | 要的数据 / 参数 |
+|---|---|
+| `online` | 几个演示账号**用浏览器**同时登着 —— 页面默认只列有实时连接的会话，接口登录造的会话不显示。脚本按 `SHOTS_DEMO_USERS`（默认 zhoumin,sunqiang,zhaolei，密码 `SHOTS_DEMO_PASSWORD` 默认 123456）自己开上下文登录 |
+| `log-change` | 改过几次部门名、参数配置（走接口，才有数据变更记录） |
+| `file` · `notice` · `open-app` | 传几个文件、发几条公告、建一两个开放应用 |
+| `dept-import` | `SHOTS_IMPORT_FILE` 指向一份按模板填的 xlsx，最好有将新增的行也有出错的行 |
+| `monitor-redis` | 拍之前等 20 秒左右攒出趋势点 |
+
+🔴 **不拍「服务器监控」**：那一页有主机名、局域网 IP 和**带本机用户名的解释器路径**（`/home/<你>/…/.venv/bin/python`），
+进了公开文档就是泄露。监控页的首图用 Redis 监控（拍图环境里是一次性容器）。新增首图前同样先看一眼有没有本机信息。
+
+🔴 **浏览器 UA 要换成普通 Chrome**（脚本里的 `CONTEXT.userAgent`）：默认的 `HeadlessChrome` 会原样出现在
+「在线用户」「登录日志」的浏览器一栏。
+
+⚠️ 正文里出现 `{{n}}` 这类花括号的页面转成 `.mdx` 后会被当成 JSX 表达式，构建报 `ReferenceError`；
+写成行内代码。转之前可以先扫一遍代码块之外的 `{` `}` `<`。
 
 ## SEO 相关的配置在哪
 

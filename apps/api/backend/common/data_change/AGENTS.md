@@ -7,14 +7,16 @@
 > **新增结论请追加到离代码最近的那一份**。
 
 ```
-registry.py   登记表：哪些表要记、每一列怎么记（普通 / 引用 / 敏感 / 忽略）· 关联表折叠成集合字段 · 来源和动作的中文名
+registry.py   登记表：哪些表要记、每一列怎么记（普通 / 引用 / 敏感 / 忽略）· 关联表折叠成集合字段 · 一对一子表折叠成开关字段 · 来源和动作的中文名
 capture.py    拦截层：挂在 Session 类上的五个事件 · 「第一次碰到时拍原样，提交时和现状比」· 同一个事务里写 sys_data_change
+chain.py      防篡改链：写入时编号 + 签名（含上一行的签名）· 校验 · 保留期推锚点 · 迁移补签
 ```
 
-内置登记在 `app/admin/data_change.py`（用户 / 部门 / 角色 / 菜单 + 三张关联表），插件放自己目录下的
-`data_change.py`（参数配置：`plugin/config/data_change.py`）。表是 `app/admin/model/data_change.py`，
+内置登记在 `app/admin/data_change.py`（用户 / 部门 / 角色 / 菜单 + 三张关联表 + 用户的二次验证 · 存储 · 数据范围 / 规则）和 `app/task/data_change.py`（定时任务），插件放自己目录下的
+`data_change.py`（参数配置 `config` · 第三方账号 `oauth2` · 开放应用 / Webhook 端点 `open` · 群机器人 / 通知策略 `notification` · 短信配置 `sms` ·
+模型密钥 / MCP 凭据 `ai` · 字典 `dict` · 流程定义 `workflow`）。表是 `app/admin/model/data_change.py`，
 接口 `GET /api/v1/logs/changes`（+ `/meta`），权限码 `log:change:list`，**不按数据权限过滤**（#260 拍板，同操作日志）。
-前端：「日志管理 → 数据变更」页（`pages/log-change`）· 五个页面的「变更记录」抽屉（`pages/_shared/data-change`）·
+前端：「日志管理 → 数据变更」页（`pages/log-change`）· 各页的「变更记录」抽屉（`pages/_shared/data-change`；卡片页用 `ChangeHistoryButton`）·
 操作日志详情的「这次改了什么」（按 `trace_id`）。保留期参数 `DATA_CHANGE_RETENTION_DAYS`（默认 180，参数配置「日志」组），
 `maintenance.prune_logs` 每天删。
 
@@ -82,7 +84,7 @@ PR 第一版合并前跑了一次独立评审，下面五条都是**读代码能
 
 | 症状 | 根因 | 修法 | 实测证据 |
 |---|---|---|---|
-| 🔴 SMTP 密码明文进审计表，留 180 天 | `EMAIL_PASSWORD` 就存在 `sys_config` 里，`value` 第一版按普通列记 | 登记表加 `secret_when`：键名以 PASSWORD / SECRET / TOKEN / API_KEY 结尾的行只记「改过」（和前端参数配置打码同一条规则） | `test_a_password_like_config_value_is_recorded_as_secret` |
+| 🔴 SMTP 密码明文进审计表，留 180 天 | `EMAIL_PASSWORD` 就存在 `sys_config` 里，`value` 第一版按普通列记 | 登记表加 `secret_when`：键名像密钥的行只记「改过」。规则后来抽到 `common/secret_keys.py`，和前端参数配置页、操作日志共用一条（原来这里抄的那份区分大小写、少了 CREDENTIALS，和前端对不上；`tests/test_secret_keys.py` 对账） | `test_a_password_like_config_value_is_recorded_as_secret` |
 | 一个请求拆成好几条记录；保存点里写记录出的错被吞掉、记录丢失 | **保存点提交也触发 `before_commit` / `after_commit`**（`_prepare_impl` 里 `if self._parent is None or self.nested`）。AI 工具每调用一次就开保存点写调用审计 | 两个钩子都 `session.in_nested_transaction()` 时跳过 | `test_a_savepoint_commit_does_not_split_or_drop_the_record`（去掉任一个跳过都红） |
 | 每次登录多查两次整行 | `update_login_time` 只写忽略列，照样前查后查 | 语句写的列全在忽略列里就不抓 | `test_writing_only_ignored_columns_skips_the_capture`（数 `_fetch` 调用） |
 | 从很多人身上摘掉一个角色：逐个拍集合、写几万行，全在业务事务里；按主键批量更新几千行在 SQL Server 上超 2100 个参数，业务 UPDATE 跟着失败 | 关联表没有 `BULK_LIMIT`；executemany 的主键一次塞进一个 IN | 关联表超限记一条汇总（哪个集合字段、多少个对象、加了 / 去了谁）；executemany 超限直接汇总（`varies`：每行值不同），不超限分批查 | `test_an_association_delete_over_the_limit_is_one_summary` · `test_executemany_over_the_limit_is_one_summary_without_a_pre_select` |
@@ -114,6 +116,160 @@ PR 第一版合并前跑了一次独立评审，下面五条都是**读代码能
 
 **修法**：去掉 `onupdate`。**实测证据**：第一次探针只改昵称，比对结果里 `last_login_time` 跟着变了；
 `test_updating_a_user_no_longer_touches_last_login_time` 守着（把 `onupdate` 加回去就红）。
+
+## 二期：用户的二次验证 · 第三方账号
+
+两张表都记在**用户**名下，不单独当对象 —— 单独记的话记录挂在子表自己的 ID 上，用户的「变更记录」里看不到
+「谁把他的二次验证关了」。
+
+| 表 | 怎么登记 | 用户名下出现的字段 |
+|---|---|---|
+| `sys_user_mfa`（开了才有这一行） | `register_audited_child`：有没有这一行 = 开关字段；`values` 从那一行算值，两边都有行时才比 | 二次验证（未开启 ↔ 已开启）· 恢复码（只记「改过」） |
+| `sys_user_social` | `register_audited_set(..., active='deleted', member_labels=...)` | 第三方账号（+ GitHub / − Google） |
+
+管理员重置和自己关是同一条「已开启 → 未开启」，区别在操作人。开启时只记开关，不另记「生成了恢复码」。
+
+| 症状（不处理的话） | 根因 | 修法 | 实测证据 |
+|---|---|---|---|
+| 🔴 开二次验证（`db.add`）、自己关（`db.delete`）、绑第三方账号（`create_model`）一条都不记，只有管理员重置（语句 `delete(UserMfa)`）记得到 | unit of work 在 flush 时发的 INSERT / UPDATE / DELETE **不经过** `do_orm_execute`（它只拦 `Session.execute()`）。一期的三张关联表都是 Core 表、只被语句写，碰不到这条 | `before_flush` 里 `_remember_flushed`：新建 / 改过 / 要删的子表对象按父对象拍原样 | 去掉这一句 → `test_mfa.py::TestChangeRecords` 和 `test_social_change_records.py` 红 |
+| 🔴 解绑不出记录 | 解绑是逻辑删除（`UPDATE … SET deleted = id`），查成员不过滤的话被标删的那行还算「绑着」，前后集合一样 | 关联表登记给 `active`：非 0 的行不算成员 | 去掉过滤 → 社交那条红 |
+| 🔴 登录过程中被强制绑定二次验证、第三方回调绑定账号，操作人是空、来源是「系统」 | 这两个请求不带登录态（还没登进来 / 第三方重定向回来），请求上下文里没有 `user_id` | `with data_change_source('web' / 'oauth2', actor_id=…)`，人从挑战令牌 / OAuth2 state 里取 | 去掉任一处 → 对应那条红 |
+| 每次用恢复码登录多一条「恢复码：已修改」，而且是「系统」改的 | 用掉一个恢复码会把 `used` 写进同一列 JSON | 比的是「这一批是哪几个哈希」（`_recovery_batch`），不是整段 JSON | 改成按整段比 → `test_using_a_recovery_code_is_not_a_change` 红 |
+| 每次用动态码登录前查后查两次 | 防重放要写 `last_step` | 进 `ignore`；ORM 改属性和语句 UPDATE 两条路都按「写的列全在忽略列里」跳过 | 去掉任一条跳过 → `test_writing_only_ignored_child_columns_skips_the_capture`（数 `_snapshot` 调用）红 |
+
+⚠️ 子表的列**不进审计表**，进的只是 `values` 算出来的东西，所以不像对象那样要求每一列归类（新加的列没人读就不会漏）。
+`ignore` 只决定「写这几列要不要抓」—— 把被 `values` 读的列写进去会漏记。
+
+**没接的**：个人偏好（工作台布局，拖一下就是一条）· 密码历史（派生数据，「密码：已修改」已经在用户上）·
+会话 / 强制下线（在 Redis，操作日志里有）。
+
+## 二期：单字段历史 · 导出 · 防篡改链
+
+**单字段历史**：变更记录抽屉里点字段名只看这一个字段（状态跟着抽屉走）；「数据变更」页详情里点字段名，
+对象 + 字段写进地址栏（能分享）。后端早就支持 `field` 筛选（`fields` 列存 `,a,b,`），这次只接前端。
+
+**导出**：`POST /logs/changes/export`（`log:change:export`，迁移 + 三份种子 + 清单），框架照 `common/dataio`。
+「改了什么」一格是 `昵称：A → B；角色：+X −Y；密码：已修改（不记录内容）`。⚠️ 字段名、动作、对象类型的英文在前端语言包里
+（中文原文即 key），后端读不到 —— 英文文件里出代号（`nickname: A → B`），不出中文；引用的名字（部门名）是业务数据，照摊。
+
+**防篡改链**（`chain.py`，`GET /logs/changes/integrity` 超管 · `fba data-change verify` · 页面上「校验完整性」）：
+每行带序号，签名 = `HMAC(DATA_CHANGE_CHAIN_KEY, 上一行签名 + 这一行的规范文本)`。密钥只放 `.env`、不进库。
+
+| 症状（不处理的话） | 根因 | 修法 | 实测证据 |
+|---|---|---|---|
+| 🔴 SQL Server 上两个并发请求拿到同一个序号，唯一索引让其中一个业务提交直接失败 | SQLAlchemy 的 mssql 方言**静默丢掉** `with_for_update()`：编译出来是一条裸 SELECT，没有锁 | 先 `UPDATE sys_data_change_chain SET head_seq = head_seq + n` 占行锁（三个方言都持有到提交），再读链头；锁是这个事务最后拿的，拿到之后只写这两张表，不会和业务行锁成环 | 三个方言编译 `select().with_for_update()`：PostgreSQL / MySQL 带 `FOR UPDATE`，mssql 没有。`test_concurrent_writers_queue_on_the_chain_head`（6 个线程在屏障后同时提交，序号连续、链校验通过） |
+| 迁移之前就有的记录被成批报成「伪造」，或者伪造的行冒充旧行 | 第一版按「链上最早那一行的时间」分「上线前的旧行 / 绕过应用塞进来的」：时间一错开就误报，伪造的人把时间写早就混进旧行 | 迁移 `an000000datachangechain` 把已有记录按 (created_time, id) **补签进链**，此后没有序号的行一律是问题，不设「旧行」 | 第一版在测试里一次误报 **977 条**；补签后私有库 979 行 `fba data-change verify` 通过 |
+| 每次保留期清理之后，校验报「中间少了几行」 | 按时间删、起点不动的话，删掉的那段就是缺口 | 清理先把锚点推到「第一条还要留的」前一条、提交，再按序号删；校验从锚点往后算。链头写进任务日志（库外的旁证） | `test_pruning_chained_data_changes_keeps_the_chain_verifiable` |
+| 链头那一行没有（`fba init` 和测试库都是 create_all + 种子，不跑迁移）→ 第一次写记录就失败 | —— | `chain.link` 发现占锁的 UPDATE 改了 0 行，就在保存点里建（接着已有的最大序号），撞主键说明别人刚建好，再占一次锁 | `test_the_chain_head_row_is_created_by_the_first_write` |
+
+能发现：改过某一行 · 中间删了几行 · 最新的几行被删 / 链头被往回改 · 绕过应用塞进来的行 · 整条链换个签法自己重算（配了密钥时）。
+**发现不了**：同时拿得到库和密钥的人（能重算整条链）· 同时删掉最老几行**并**改锚点的人（锚点在库里）·
+刚配上密钥、还没有新修改的那段时间里整条链被重算（那时只会报「最新一行不是用现在的密钥签的」，有一次修改之后才能确认）。
+没配密钥时签名谁都算得出来，只防「手滑直接改库」—— 校验结果和页面上都会说。配密钥之前签的行（标识是「没配密钥」）
+照样用空密钥核对；换过密钥的话，换之前签的行只能核对序号，单独列出来。
+
+### 评审补的（#271）
+
+PR 第一版跑了一次独立评审，10 条里 8 条成立、改了；下面都是**读代码推得出来、原来的测试一条都不红**的：
+
+| 症状 | 根因 | 修法 | 实测证据 |
+|---|---|---|---|
+| 🔴 能写库、没有密钥的人把整条链的密钥标识换成假的（或「没配密钥」）再自己重算，校验回「没有发现问题」 | 不是当前密钥签的行只计数不报；「没配密钥」签的谁都算得出 | 配了密钥时**最新一行必须是用它签的**（`stale`）；当前密钥签过的行之后再出现别的标识照报 `key`；「没配密钥」的行用空密钥核对（改了配密钥之前的记录也查得出） | `test_re_signing_the_whole_chain_another_way_is_caught`（两种标识）· `test_records_signed_before_the_key_was_set_are_still_checked` |
+| 🔴 自增主键模式（`DATABASE_PK_MODE=autoincrement`）下所有被审计的提交失败 | 链为了签名自己填雪花 `id`，SQL Server 不许给 IDENTITY 列显式插值 | 签名不带 `id`，`id` 交给列默认值 / 数据库；记录靠 `chain_seq` 认 | `test_link_leaves_the_id_to_the_database` |
+| 业务高峰点「校验完整性」报「最新的记录被删掉了」 | 先读链头再一批批读记录，读记录不限上界，期间提交的行也读进来 | 只走到读链头那一刻的链头；再拿「最大序号 vs 现在的链头」兜住「把链头往回改、藏起最新几行」（**先读最大序号再读链头**，反过来两次读之间一提交就误报）；校验期间锚点被推了，被删那段不算缺口 | `test_records_committed_while_verifying_are_left_for_next_time` · `test_rolling_the_head_back_to_hide_the_newest_records_is_caught` |
+| 🔴 清理把伪造的行删了 | 没有序号的行原来按时间删 —— 迁移补签之后它们就是绕过应用写进来的 | 不删，留给校验报；任务日志里说一声 | `test_pruning_leaves_records_written_around_the_app` |
+| 链头那一行不在时清理照删，之后永远报着一段「缺口」 | 推不了锚点、照样按序号删 | 链头不在就不删有序号的行 | `test_pruning_without_a_head_row_deletes_no_chained_record` |
+| 多实例时钟有偏差时，还在保留期里的行被提前删 | 按「早于 cutoff 的最大序号」推锚点，序号和时间不严格同序 | 推到「第一条还要留的」前一条：宁可多留，不少留 | `test_pruning_never_takes_a_record_still_in_retention`（序号 a < b < c，b 在保留期里、c 更早） |
+| 抽屉开着换对象，带着上一个对象的字段筛选 | 只在关掉时清 | 换对象也清 | —— |
+| 详情里点字段名，「这个字段的历史」被原来的筛选缩小 | 合并了原有的 search | 只留对象 + 字段（视图状态留着） | E2E 带 `actor=admin` 进来，点完不能还在地址栏里 |
+
+另外：新库（`fba init` / 测试库）的种子里放了链头那一行，第一次写记录不用再在保存点里建 —— 评审推断 MySQL 上两个首写会死锁
+（`UPDATE` 没匹配到行时拿了间隙锁），**没实测**；自增主键模式没有种子，仍走保存点那条路。
+没改的一条：每次提交在链头那一行上「UPDATE + SELECT + UPDATE」三次往返、锁到提交，PostgreSQL 的 `RETURNING` /
+SQL Server 的 `OUTPUT` 能省一次，但要按方言分叉、MySQL 没有 —— 后台写少，先不做。
+8 处变异各打红一条（上表测试）；前端「点字段名」那处改回合并原有 search → E2E 红。
+
+⚠️ **推断，没实测**：MySQL 上「先 UPDATE 再读」要求 UPDATE 真的改了值（`+ n`）—— InnoDB 的一致性读只认本事务改过的行，
+`SET x = x` 之后再 SELECT 可能读到事务开头的旧快照。本机没有 MySQL 容器，这条没跑过。
+
+⚠️ 这条链让每次提交多一把锁和几条语句，把「接口回 200 时事务还没提交」那个窗口撑得更宽了（`common/AGENTS.md`
+「写接口的事务要在响应之前提交」，#268）：没合那个修复之前，`data-change.spec.ts` 第一步「建部门 → 按编码查」就查不到。
+
+**实测证据 / 变异**：`test_data_change.py` 新增 9 条（链 · 改内容 · 删中间 / 删最新 · 绕过应用塞行 · 没密钥重签 · 有密钥只重签一行 ·
+并发 · 链头重建 · 超管接口）· `test_prune_logs.py` 一条 · `test_export.py` 一条（中文 / 英文两份文件 + 拼错的筛选参数被拒）· E2E `data-change.spec.ts`
+加了单字段历史、导出按钮、完整性校验（前端去掉按字段过滤 → 红在 `Expected: 0, Received: 1`）。
+后端 12 处变异各有测试红：链头不占锁（先读后写）· 不重算签名 · 不查没序号的行 · 不认密钥标识 · 不查链头 · 不查缺口 ·
+没有链头就不建 · 清理不推锚点 · 清理按时间删 · 导出英文也出中文 · 校验接口谁都能调 · **签名不带上一行** ——
+最后这处第一轮没有测试红：序号本身签在签名里，改内容、删中间不靠串联也查得出。串联守的是「密钥泄露了也得整条重签、
+链头和库外日志对不上」，补了 `test_re_signing_one_record_breaks_the_next` 才红。迁移在私有库上
+`downgrade -1` → `upgrade head` 走过，`test_model_matches_migrations` 对升级上来的库通过。
+
+## #281 第一批：带密钥的对象
+
+开放应用 · Webhook 端点 · 群机器人 · 短信配置 · 存储 · 模型密钥 · MCP 凭据。归类的规矩：
+
+| 列 | 归类 | 为什么 |
+|---|---|---|
+| `*_cipher` · MCP 的 `token_sha256` | 敏感（只记「改过」） | 密文 + 加密密钥 = 明文；哈希能拿去撞 |
+| `*_hint` · `*_mask` | 忽略 | 跟着密文变，记了就是每次换密钥多一条「前几位从 A 改成 B」。例外：群机器人地址的掩码（主机 + 打了码的令牌）照记，改了地址看得出指向了哪里（#284 评审） |
+| Webhook 的 `url` · 群机器人的地址 | 敏感 | 地址里就带着令牌（钉钉 access_token、企微 key、对接方的查询串）；有 `log:change:list` 的人不一定能看那一页 |
+| `last_used_time` · `last_sent_time` · `last_error` · 投递计数 | 忽略 | 每次调用 / 发送都写，记了就是刷屏。走的都是「只写忽略列 → 跳过」那条路，测试里先断言它真写了，再断言没出记录 |
+| Webhook 的 `secret_prev_*` · `disabled_reason` / `disabled_time` | 忽略 | 轮换时自动挪过去的旧密钥、自动停用的附带列；「签名密钥：已修改」「状态：正常 → 停用」已经说明了 |
+
+🔴 **接审计时顺带抓到的既有漏洞：短信配置的凭据能从 `options` 绕进库。** `build_provider_config` 只在自己的副本里
+把凭据字段换成凭据栏的值，`options` 却是原样 `json.dumps` 进库的 —— 带着 `access_key_secret` 保存，200，库里明文
+（详情接口原样下发）。审计按普通值记 `options` 的前提就是这里拦住，所以保存时拒收（`plugin/sms` 分册）；
+已经存进去的由迁移 `ar000000smsoptcreds` 清掉 —— 不清的话改那一行时旧 `options` 以明文进审计表（#284 评审）。
+
+🔴 **「只改忽略列就跳过」两条路都要有**：语句式 UPDATE 那条早有；改已加载对象的属性（`hook.last_delivery_time = …`，
+Webhook 每投递一次）原来没有，每次白查两次整行。测试要走真实的写法并数查询（`capture._current_rows`）——
+第一版用语句式 UPDATE 测，走的根本不是投递那条路（#284 评审）。
+
+⚠️ 静态守卫里 `pk_mode=False` / `bulk_create_models` / `.connection()` 那一项原来是手写的七个文件，新登记的表一个都不在里面；
+现在凡是 import 了登记模型的生产代码都查（`_ALLOWED` 里放行只读的那一处）。
+
+⚠️ **测试收尾不要删审计记录**（`tests/utils/data_change.py` 刻意不提供）：删了就在链上挖出缺口。已有的
+`test_data_change.py` 收尾会删，所以**同一个库上先跑过 pytest，E2E `data-change.spec.ts` 的「校验完整性」必红**
+（实测：私有库 117 行里 15 段缺口）；CI 的 E2E 用单独新建的库，不受影响。本地要跑那条就先 `test:db` 重建。
+
+**实测证据**：各模块的测试各加一条生命周期（新建 → 改 → 换密钥 → 删）：`test_open_apps.py` · `test_webhooks.py` ·
+`test_bots.py` · `test_sms_config_api.py` · `test_storage.py` · `test_ai_change_records.py`（两条），都读库断言明文、密文、哈希
+一个字都不在记录里；E2E `data-change-secrets.spec.ts`（开放应用的行操作 · MCP 凭据的卡片按钮）。
+变异 11 处各有测试红：7 个密钥列逐个改成普通值 · 4 个「每次都写」的列逐个移出忽略；评审补的：去掉改属性那条捷径 → Webhook 那条红在查询次数；守卫按 import 认文件，在三个新登记表的 DAO / service 里塞绕过写法各红一条；E2E 去掉两个入口各红一条
+（只改权限码是等价变异：admin 是超管）。
+
+## #281 第二批：数据权限 · 通知策略
+
+- **数据范围只是一捆规则的名字**（运行时不构成边界）：范围名下记「名称 / 状态」和挂了哪些规则（关联表 `sys_data_scope_rule`
+  折叠成集合字段 `rules`，+ / − 按规则名）；规则自己的改动记在规则名下。改一条规则会影响所有挂着它的范围 ——
+  **看范围的记录看不出来**，要去规则那边看。运算符 / 表达式的显示名和前端 `OPERATOR_ITEMS` / `EXPRESSION_ITEMS` 同一组
+- **通知策略一格一行，没有行 = 注册表默认值**：第一次改某一格是「新建」，改回默认值是「删除」（`delete_cell`）。
+  🔴 对象名是「类型 · 渠道」（`label=('kind', 'channel')`，登记支持多列拼名字）：第一版只记类型码，而「改」的记录里只有变了的
+  「策略」、「删」的记录里没有字段 —— 同一次保存改了同一类型的邮件和短信两格，列表上是两条分不开的记录（#286 评审）。策略页是矩阵、没有「一行一个对象」，
+  「变更记录」按钮带着 `entity_type=notification_policy` 跳「数据变更」页
+
+**实测证据**：`test_data_permission_changes.py`（建规则 → 建范围 → 挂上 → 改规则表达式 → 改范围名和状态 → 摘下 → 删）·
+`test_channels.py::test_policy_changes_are_recorded`（新建 → 改 → 改回默认值 = 删除）· E2E `data-change-perm.spec.ts`。
+变异各红：范围不折叠规则 · 规则不登记 · 表达式 / 策略各少一个显示名；E2E 去掉两个入口各红一条。
+
+## #281 第三批：定时任务 · 字典 · 流程定义
+
+| 坑 | 不处理会怎样 | 怎么做的 |
+|---|---|---|
+| 🔴 加载器原来只认 `app.admin` 和插件 | 登记写在 `app/task/data_change.py` **静默不生效**：不报错，改了定时任务就是没有记录 | 加载器扫 `backend/app/*` 和插件下所有的 `data_change.py`；`test_scheduler_api.py` 那条断言真的出了记录（改回只认 `app.admin` → 红） |
+| beat 每触发一次回写「累计触发 / 最近触发」 | 每触发一次一条记录 | 两列进 `ignore`；回写只动忽略列，拦截层直接跳过（测试照 `_persist` 的写法写一次，断言 0 条） |
+| 流程设计器每点一次保存，草稿 JSON 整段变 | 刷屏，而且草稿不生效 | 草稿两列进 `ignore`；记的是发布（`current_version_id` 引用版本号：「已发布版本：→ 1」）和状态 |
+| 引用的显示名不一定是字符串（版本号是整数） | 前端拿它当文本交给 `t()` | 拦截层把引用的显示名一律转成字符串 |
+| 🔴 发号器原来取 `timezone.now()`，假时钟测试（`test_scheduler_timing.py`）一改调度就要写审计行、要发 ID | 发号器记住假时钟下的时间戳，假时钟一撤，之后**整套 pytest 连环几百条**「时钟回拨」，红的全是不相干的测试 | `utils/snowflake.py` 改用系统时钟（`tests/test_snowflake_clock.py`；退回 → 红） |
+| 字典项折叠进类型 | 一个类型几十项，改一项就是类型上一条「字典项：…」，看不出改的是哪一项 | 字典项单独一类，所属类型按引用存当时的名字；`type_code` 是冗余副本，不另记 |
+
+定时任务的 `args` / `kwargs` 按普通值整段记：任务参数不该放凭据（要用的密钥放 `.env` 或参数配置）。
+
+**插件开关没接**：状态存在 Redis（`PLUGIN_REDIS_PREFIX`），不经过数据库会话，拦截层看不到；要接得先有「手动记一笔」的入口。
+
+**实测证据**：`test_scheduler_api.py::test_changes_are_recorded_but_beat_bookkeeping_is_not` · `plugin/dict/tests/test_dict_changes.py` ·
+`test_definition.py::test_definition_changes_are_recorded_but_drafts_are_not` · E2E `data-change-ops.spec.ts` 三条。
+变异各红：加载器只认 `app.admin` · 触发计数不忽略 · 草稿不忽略 · 引用显示名不转字符串 · 字典项不引用类型；E2E 去掉三个入口各红一条。
 
 ## 性能
 

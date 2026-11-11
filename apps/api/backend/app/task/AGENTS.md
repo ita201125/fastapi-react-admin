@@ -23,7 +23,7 @@ model/ crud/ service/ schema/ api/  三层，和 admin 同构
 ## 起服务
 
 ```bash
-pnpm dev                        # api + web + worker（worker 含内嵌 beat）
+pnpm dev                        # api + web + worker / beat
 pnpm --filter worker dev        # 只起 worker
 ```
 
@@ -31,8 +31,20 @@ pnpm --filter worker dev        # 只起 worker
 （报「-B option does not work on Windows」直接退出）；而且 `VAR=x cmd` 这种行内设环境变量的写法，
 Windows 上的 pnpm（走 cmd）根本不认。原来那一行脚本在 Windows 上 worker 窗格直接挂掉，api / web 照常跑，
 定时任务和异步通知**全都静默不执行**（工作台显示「心跳停在 N 小时前」）。现在 Windows 上拆成 worker + beat
-两个进程，其他平台照旧 `-B`；环境变量在 node 里设。实测：本机（Windows）`pnpm --filter worker dev` 起来后
+两个进程；macOS 同样拆开（原因见下），Linux 照旧 `-B`；环境变量在 node 里设。实测：本机（Windows）`pnpm --filter worker dev` 起来后
 worker `ready`、beat 正常派发。
+
+🔴 **macOS 的 `-B` 也会坏，但不是「不支持」。** worker 可以 `ready`，内嵌 beat 随后报
+`+[NSCharacterSet initialize] may have been in progress in another thread when fork() was called` 并崩溃，
+只剩 worker 活着、定时任务停了。Celery 的 `EmbeddedService` 默认用子进程，
+不是线程；在 worker 已启动线程后 fork，子进程触发了 Objective-C 的安全检查。
+修在开发入口 `apps/worker/dev.mjs`：macOS 和 Windows 分别启动 worker / beat，
+继续使用 `--pool=custom` 执行异步任务。
+
+**实测证据**（2026-11-09，macOS 26.6 / Python 3.14.5 / Celery 5.6.3）：
+原来的内嵌 beat 报上述 fork 错误；拆开后 worker `ready`，beat 载入 11 条调度并派发到内存队列，
+Ctrl-C 后两个进程退出码都是 0。验证用 `CELERY_BROKER_URL=memory://` 隔离了队列，
+只证明启动、载入和退出正常，没有执行实际的业务任务。
 
 🔴 **`-B`（内嵌 beat）只用于开发。** 多副本部署时每个副本都跑一个 beat，
 同一条调度被触发 N 次。生产要分开，且 beat **只起一个**：
@@ -416,3 +428,42 @@ SQL Server（本机容器，RCSI 关着，同 CI）：本模块 + `test_health.p
 （原生 SQL、迁移）要等定时重读；更彻底的是在 Session 级挂 `do_orm_execute` / `after_flush` 统一登记，但要排除 beat 自己的
 回写，留给后续。③ 「提交后做一件事」后来抽成了公用的 `common/after_commit.py: run_after_commit`（通知推送 / 通知投递 /
 Webhook 投递都走它，#190 迁完）；**这里的变更标记刻意没迁**：它挂在同步会话上、提交后做的是一次同步的 Redis 写，公用那份派的是协程。
+
+## 🔴 Redis 密码带 `/`：网站正常，后台任务和实时推送连不上（上游 #1276 同类）
+
+**症状**：登录、页面都正常，`/api/health/ready` 也是 200；但 worker 起不来或一直连不上 broker，
+站内消息不实时推送。`/api/health/status` 里 worker 心跳是停的。
+
+**根因**：只认 URL 的两处（celery 的 broker、socket.io 的 `AsyncRedisManager`）拼地址时用了裸 `urllib.parse.quote(密码)`。
+`quote` 默认 `safe='/'`，密码里的 `/` 原样留在 URL 里，解析器把它当成路径开头，主机、端口全错。
+主站的 `redis_client` 是按参数分开传的、不走 URL，所以**只坏一半**，看着像 worker 自己的问题。
+`openssl rand -base64` 生成的密码经常带 `/`。结果后端用的是 `quote_plus`，密码里的空格会变成 `+`。
+
+**修法**：两处都走 `database/redis.py: get_redis_url()`，用户名 / 密码一律 `quote(..., safe='')`（`celery.py: _userinfo`）。
+
+**实测证据**：密码 `Ab3/x+Yz@9`，改之前 kombu 和 redis-py 都报
+`ValueError: Port could not be cast to integer value as 'Ab3'`；密码 `pass word` 经 `quote_plus` 后，
+SQLAlchemy 解析回来是 `pass+word`。修后 `backend/tests/test_connection_urls.py` 用 kombu `Connection` /
+redis-py `parse_url` / SQLAlchemy `make_url` 把四种密码（含 `/`、空格、`%`、中文）解析回原样，三种库都测；
+把修法退回旧写法，其中 6 条变红。
+
+## 🔴 登录 / 操作日志默认只留 30 天，低于网络安全法的六个月（#261）
+
+**症状**：没有任何报错。用默认配置部署，五个月前的登录日志、操作日志查不到了 ——
+而《网络安全法》（2016 年版）第二十一条第（三）项要求网络日志「留存不少于六个月」。部署的人不会知道要去改。
+
+**根因**：天数写在种子调度「清理历史日志」的参数里（`{"days": 30}`），任务函数的默认值也是 30；
+参数配置页看不到，部署文档也没写。开放接口调用日志、短信发送日志跟着同一个天数。
+
+**修法**：180 写在四处，`test_prune_logs.py::test_default_retention_agrees_everywhere_and_meets_the_six_month_floor` 对账：
+`tasks/maintenance/tasks.py: LOG_RETENTION_DAYS`（`days` 的默认值）· 三份种子 · 迁移 `ap000000logretention`。
+迁移只改种子那一行、且参数解析出来还是 `{"days": 30}` 的；管理员调过的（哪怕比 180 短）不动，降级也不改回去。
+
+⚠️ **没做的**：天数仍在调度参数里，没挪进参数配置（数据变更记录那个在）；登录 / 操作日志页的「删除」「清空」
+仍然能删保留期内的记录。
+
+**实测证据**（2026-11-10，PostgreSQL 私有库）：把种子那一行改回 `{"days": 30}` 和原备注，stamp 到 `ao000000loginevent`
+再 `alembic upgrade head` → `{"days": 180}`、备注换成新的；参数是 `{"days": 90}` 的同样升级后原样。
+三处变异各让迁移那条测试变红：按字符串比（界面上存过一次、写成 `{"days":30}` 的就漏改）· 不看备注是不是种子原文 · 不看天数。
+任务默认值、一份种子退回 30，对账那条红。
+存储：本机开发库操作日志 3674 条、8256 kB（含索引），平均每条约 2 KB —— 每天 1 万条留 180 天约 4 GB，写进了文档站「上线前检查清单」。

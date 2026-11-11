@@ -45,7 +45,7 @@
 | 动后端模型 / 接口 / SQL · **解析上传的 xlsx** | [`apps/api/AGENTS.md`](apps/api/AGENTS.md) |
 | 动公共层（校验 / 异常 / 缓存 / 分页） | [`apps/api/backend/common/AGENTS.md`](apps/api/backend/common/AGENTS.md) |
 | 跑 pytest / 建测试库 / 测试跑不起来 | [`backend/tests/AGENTS.md`](apps/api/backend/tests/AGENTS.md)（admin 模块自己的在 [`app/admin/tests/`](apps/api/backend/app/admin/tests/AGENTS.md)） |
-| **动权限码 / 数据范围 / token 与 cookie 时长** · **数据变更审计**（谁把哪个字段改了 · 给登记过的表加列） | [`common/security`](apps/api/backend/common/security/AGENTS.md) · [`common/data_change`](apps/api/backend/common/data_change/AGENTS.md) |
+| **动权限码 / 数据范围 / token 与 cookie 时长** · **数据变更审计**（谁把哪个字段改了 · 给登记过的表加列 · 防篡改链） | [`common/security`](apps/api/backend/common/security/AGENTS.md) · [`common/data_change`](apps/api/backend/common/data_change/AGENTS.md) |
 | **动数据库结构 / 写迁移 / 改种子数据** | [`apps/api/backend/alembic/AGENTS.md`](apps/api/backend/alembic/AGENTS.md) |
 | 动定时任务 / Celery / 调度 | [`apps/api/backend/app/task/AGENTS.md`](apps/api/backend/app/task/AGENTS.md) |
 | 动命令面板 / 快捷键 / 功能引导 | [`packages/platform/src/shell/AGENTS.md`](packages/platform/src/shell/AGENTS.md) |
@@ -149,7 +149,7 @@ import 都没有，所以 `packages/ui` 对 workspace 零依赖 —— 刻意的
 
 ```bash
 docker start fba_postgres fba_redis       # PostgreSQL :5432 / Redis :6380（2026-09-08 起默认库，换回 SQL Server 见 docker-compose.dev.yml 的 mssql 注释）
-pnpm dev                                  # api :8088 · web :8888 · celery worker（含内嵌 beat）；对象存储另起 `--profile s3 up -d rustfs`（见 compose 注释）
+pnpm dev                                  # api :8088 · web :8888 · celery worker / beat；对象存储另起 `--profile s3 up -d rustfs`（见 compose 注释）
 ```
 
 `apps/api` 和 `apps/worker` 都是 pnpm workspace 成员（`package.json` 里只有一个
@@ -159,10 +159,10 @@ pnpm dev                                  # api :8088 · web :8888 · celery wor
 ```bash
 pnpm --filter api dev                     # 等价于 cd apps/api && uv run python -m uvicorn ...
 pnpm --filter web dev
-pnpm --filter worker dev                  # celery worker -B（worker + 内嵌 beat）
+pnpm --filter worker dev                  # worker + beat（Linux 内嵌，macOS / Windows 分开起）
 ```
 
-`apps/worker` 里只有一个起进程的 `dev.mjs`（Windows 上 celery 不支持 `-B`，要拆成 worker + beat 两个进程，见 [`task` 分册](apps/api/backend/app/task/AGENTS.md)）—— 存在的理由是让 worker 的日志有
+`apps/worker` 里只有一个起进程的 `dev.mjs`（Windows 不支持 `-B`，macOS 会触发 fork 崩溃，两者拆成 worker + beat 两个进程，见 [`task` 分册](apps/api/backend/app/task/AGENTS.md)）—— 存在的理由是让 worker 的日志有
 自己的窗格。写进 `apps/api` 的 `dev` 里（`uvicorn & celery & wait`）也能跑，
 但两份日志会挤在一个窗格里交替刷，而 worker 的日志很密。
 
@@ -395,6 +395,6 @@ pnpm db:history                        # 看链条
 数据权限模型都是 FBA 的设计，SQL Server 支持是本仓库加的。上游明确拒绝合并
 那部分，所以是**永久分叉**，只 cherry-pick 上游安全补丁，功能更新不跟。
 
-- 分叉基线记在 `apps/api/.upstream-baseline`；上游同为 MIT，版权声明保留在 `apps/api/LICENSE`
+- 分叉基线记在 `apps/api/.upstream-baseline`，**审到上游哪个提交、每条拿没拿**记在 [`apps/api/UPSTREAM.md`](apps/api/UPSTREAM.md)；上游同为 MIT，版权声明保留在 `apps/api/LICENSE`
 - 后端架构文档（三层结构 / 插件机制 / RBAC 的设计意图）看上游那份最全：
   <https://docs.fba.wu-clan.cc>——本仓库的 `apps/api/AGENTS.md` 只记上游没有的两件事：差异点、和这里踩过的实测坑

@@ -1,6 +1,12 @@
 // @ts-check
+import { readdirSync } from 'node:fs'
+import { join, relative, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import starlight from '@astrojs/starlight'
 import { defineConfig } from 'astro/config'
+
+import { DOC_SECTIONS } from './src/navigation.mjs'
 
 // 🔴 站点挂在子路径下（GitHub Pages 是 yilecoding.github.io/fastapi-react-admin/），
 // Astro 只给它自己生成的链接（侧边栏、上下篇、语言切换）补 base，**正文里手写的
@@ -13,8 +19,6 @@ const SITE = process.env.DOCS_SITE ?? 'https://yilecoding.github.io'
 const BASE = process.env.DOCS_BASE ?? '/fastapi-react-admin'
 
 const REPO = 'https://github.com/yilecoding/fastapi-react-admin'
-// E2E 报告只发在 GitHub Pages 上（CI 的 pages job 拼进去），别的部署也指向那里
-const E2E_REPORT = 'https://yilecoding.github.io/fastapi-react-admin/e2e/'
 
 /**
  * 中文是默认语言（先推国内）。浏览器语言不是中文的访客进中文页时，右下角给一条
@@ -38,6 +42,23 @@ const EN_HINT = `(() => {
     document.body.append(bar)
   })
 })()`
+
+/** 全站文章必须在分类中恰好出现一次；首页不参与内页导航。 */
+function checkDocSections() {
+  const listed = DOC_SECTIONS.flatMap((section) => section.pages)
+  const problems = listed.filter((p, i) => listed.indexOf(p) !== i).map((p) => `「${p}」登记了不止一次`)
+  for (const locale of ['', 'en/']) {
+    const root = fileURLToPath(new URL(`./src/content/docs/${locale}`, import.meta.url))
+    const files = readdirSync(root, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && /\.mdx?$/.test(entry.name))
+      .map((entry) => relative(root, join(entry.parentPath, entry.name)).split(sep).join('/').replace(/\.mdx?$/, ''))
+      .filter((path) => path !== 'index' && !path.startsWith('en/'))
+    for (const path of files) if (!listed.includes(path)) problems.push(`${locale}${path} 没有登记进 DOC_SECTIONS，导航里看不到它`)
+    for (const path of listed) if (!files.includes(path)) problems.push(`DOC_SECTIONS 里的「${path}」在 ${locale || '中文'}目录下没有文件`)
+  }
+  if (problems.length) throw new Error(`文档分类对不上：\n  ${problems.join('\n  ')}`)
+}
+checkDocSections()
 
 /** 正文里 `/` 开头的站内链接补上 base（`//host` 这种协议相对地址不动，已经带 base 的不重复补） */
 function remarkBaseLinks() {
@@ -67,7 +88,12 @@ export default defineConfig({
       customCss: ['@fontsource-variable/inter', '@fontsource-variable/jetbrains-mono', './src/styles/theme.css'],
       // 首页 hero 换成登录页那套品牌面板 + 立体榫卯（src/components/Hero.astro）
       // 顶栏的主题切换换成太阳 / 月亮两段式（src/components/ThemeSelect.astro）
-      components: { Hero: './src/components/Hero.astro', ThemeSelect: './src/components/ThemeSelect.astro' },
+      components: {
+        Hero: './src/components/Hero.astro',
+        ThemeSelect: './src/components/ThemeSelect.astro',
+        Header: './src/components/DocsHeader.astro',
+        Sidebar: './src/components/DocsSidebar.astro',
+      },
       social: [{ icon: 'github', label: 'GitHub', href: REPO }],
       editLink: { baseUrl: `${REPO}/edit/main/apps/docs/` },
       // 每页显示「最后更新」—— 读 git 历史，所以 CI 里 checkout 要 fetch-depth: 0，
@@ -85,37 +111,11 @@ export default defineConfig({
         { tag: 'meta', attrs: { name: 'twitter:image', content: `${SITE}${BASE}/og.png` } },
         { tag: 'script', content: EN_HINT },
       ],
-      sidebar: [
-        {
-          label: '开始',
-          translations: { en: 'Getting started' },
-          items: [{ autogenerate: { directory: 'getting-started' } }],
-        },
-        {
-          label: '指南',
-          translations: { en: 'Guides' },
-          items: [{ autogenerate: { directory: 'guides' } }],
-        },
-        {
-          label: '功能',
-          translations: { en: 'Features' },
-          items: [{ autogenerate: { directory: 'features' } }],
-        },
-        {
-          label: '参考',
-          translations: { en: 'Reference' },
-          items: [{ autogenerate: { directory: 'reference' } }],
-        },
-        {
-          label: '链接',
-          translations: { en: 'Links' },
-          items: [
-            { label: '在线演示', translations: { en: 'Live demo' }, link: 'https://fra.wubunan.com/sign-in', attrs: { target: '_blank' } },
-            { label: 'E2E 报告', translations: { en: 'E2E report' }, link: E2E_REPORT, attrs: { target: '_blank' } },
-            { label: '更新记录', translations: { en: 'Releases' }, link: `${REPO}/releases`, attrs: { target: '_blank' } },
-          ],
-        },
-      ],
+      sidebar: DOC_SECTIONS.map((section) => ({
+        label: section.label,
+        translations: { en: section.en },
+        items: section.pages,
+      })),
     }),
   ],
 })

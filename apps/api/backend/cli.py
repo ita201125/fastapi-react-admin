@@ -5,6 +5,8 @@ import secrets
 import subprocess
 import sys
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final, Literal
@@ -60,6 +62,7 @@ from backend.plugin.sql import build_sql_filename, get_plugin_destroy_sql, get_p
 from backend.plugin.validator import validate_plugin_config
 from backend.utils.console import console
 from backend.utils.dynamic_import import import_module_cached
+from backend.utils.snowflake import snowflake
 from backend.utils.sql_parser import parse_sql_script
 from backend.utils.timezone import timezone
 
@@ -257,7 +260,7 @@ async def auto_init() -> None:
         db=settings.REDIS_DATABASE,
     )
     await redis_init_client.init()
-    async with async_init_db_session.begin() as db:
+    async with snowflake_node(redis_init_client), async_init_db_session.begin() as db:
         created = await init(db, redis_init_client)
     if created:
         await run_in_threadpool(_stamp_alembic_head)
@@ -352,6 +355,33 @@ async def _set_admin_password(db: AsyncSession) -> None:
         await user_dao.reset_password(db, demo.id, secrets.token_urlsafe(24))
         await user_dao.set_status(db, demo.id, 0)
         console.note('已停用示例账号 test 并重置其密码')
+
+
+@asynccontextmanager
+async def snowflake_node(redis: RedisCli) -> AsyncIterator[None]:
+    """命令行写库期间占一个雪花节点，用完放掉 —— API 在 lifespan、worker 在 `worker_init` 里做的同一件事
+
+    🔴 `fba init` 改 admin / test 的密码会进数据变更审计（#260），审计行用雪花主键、在**提交那一刻**才写。
+    命令行不走 lifespan，不先占节点的话建完表、灌完种子，提交时报「雪花算法未初始化」、整个事务回滚（#292）。
+    要包在事务**外面**（`async with snowflake_node(...), session.begin()`）：提交发生在事务退出时，那时节点还得在。
+
+    - 条件和 lifespan 一样：自增主键模式下不占（审计行的主键交给数据库），也就不需要 Redis 里有空节点
+    - `redis` 传这一次真正要用的客户端：`--auto` 在进程里改过 Redis 配置，全局的 `redis_client` 还指着旧的
+    - 释放失败只告警：库已经建好、提交了，租约 `SNOWFLAKE_NODE_TTL_SECONDS` 秒后自己过期；
+      让它冒出去会把一次成功的初始化显示成崩溃，用户重跑就是再删一遍库
+    """
+    if not (settings.SNOWFLAKE_ENABLED or settings.DATABASE_PK_MODE == 'snowflake'):
+        yield
+        return
+    await snowflake.init(redis)
+    try:
+        yield
+    finally:
+        try:
+            await snowflake.shutdown()
+        except Exception as e:
+            ttl = settings.SNOWFLAKE_NODE_TTL_SECONDS
+            console.warning(f'释放雪花节点失败（不影响初始化结果，租约 {ttl} 秒后自动过期）：{e}')
 
 
 async def init(db: AsyncSession, redis: RedisCli) -> bool:
@@ -778,7 +808,7 @@ class Init:
         if self.auto:
             await auto_init()
         else:
-            async with async_db_session.begin() as db:
+            async with snowflake_node(redis_client), async_db_session.begin() as db:
                 created = await init(db, redis_client)
             if created:
                 await run_in_threadpool(_stamp_alembic_head)
@@ -1047,6 +1077,33 @@ class Alembic:
     subcmd: cappa.Subcommands[Revision | Upgrade | Downgrade | Current | History | Heads]
 
 
+@cappa.command(name='verify', help='从头重算数据变更记录的签名链：有没有被改过、删过、塞进来过')
+@dataclass
+class DataChangeVerify:
+    async def __call__(self) -> None:
+        from backend.common.data_change import chain
+
+        async with async_db_session() as db:
+            report = await db.run_sync(chain.verify)
+        console.print(
+            f'校验 {report.checked} 行 · 链头 #{report.head_seq} · 锚点 #{report.anchor_seq} · '
+            f'{"已配密钥" if report.keyed else "没配 DATA_CHANGE_CHAIN_KEY（只防手滑改库）"}'
+        )
+        if report.other_key:
+            console.print(f'换密钥之前签的 {report.other_key} 条，当前密钥校验不了')
+        for p in report.problems:
+            console.print(f'  {p.kind}  序号 {p.seq}{f"–{p.seq_to}" if p.seq_to else ""}  记录 {p.record_id or "-"}')
+        if not report.ok:
+            raise cappa.Exit(f'发现 {report.problem_count} 个问题', code=1)
+        console.print('[green]没有发现问题[/]')
+
+
+@cappa.command(name='data-change', help='数据变更审计')
+@dataclass
+class DataChangeCli:
+    subcmd: cappa.Subcommands[DataChangeVerify]
+
+
 @cappa.command(help='一个高效的 fba 命令行界面', default_long=True)
 @dataclass
 class FbaCli:
@@ -1054,7 +1111,9 @@ class FbaCli:
         str,
         cappa.Arg(value_name='PATH', default='', show_default=False, help='在事务中执行 SQL 脚本'),
     ]
-    subcmd: cappa.Subcommands[Init | Run | Add | Remove | Deps | Format | Celery | Alembic | None] = None
+    subcmd: cappa.Subcommands[Init | Run | Add | Remove | Deps | Format | Celery | Alembic | DataChangeCli | None] = (
+        None
+    )
 
     async def __call__(self) -> None:
         if self.sql:

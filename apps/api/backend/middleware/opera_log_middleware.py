@@ -1,7 +1,8 @@
+import asyncio
 import json
 import time
 
-from asyncio import Queue
+from asyncio import Queue, QueueFull
 from typing import Any
 
 from fastapi import Response
@@ -14,9 +15,10 @@ from backend.app.admin.service.opera_log_service import opera_log_service
 from backend.common.context import ctx
 from backend.common.enums import StatusType
 from backend.common.log import log
-from backend.common.observability.prometheus.queue import observe_queue_size
+from backend.common.observability.prometheus.queue import inc_queue_exception, observe_queue_size
 from backend.common.queue import batch_consume
 from backend.common.response.response_code import StandardResponseCode
+from backend.common.secret_keys import is_secret_key_name
 from backend.core.conf import settings
 from backend.database.db import async_db_session
 from backend.utils.trace_id import get_request_trace_id
@@ -25,12 +27,18 @@ from backend.utils.trace_id import get_request_trace_id
 #: 不是配置项：它只影响「记不记」，不影响业务，没有按环境调的理由
 _RESPONSE_PARSE_MAX_SIZE = 5 * 1024 * 1024
 
+#: 队列满、开始丢日志时，同一条告警最多多久打一次（丢了多少条会累计在里面）
+_QUEUE_FULL_WARN_INTERVAL = 60.0
+
 
 class OperaLogMiddleware(BaseHTTPMiddleware):
     """操作日志中间件"""
 
     opera_log_queue_name = 'opera_log_queue'
     opera_log_queue: Queue[CreateOperaLogParam] = Queue(maxsize=settings.OPERA_LOG_QUEUE_MAXSIZE)
+    opera_log_stop_event = asyncio.Event()
+    _dropped_since_warn = 0
+    _last_full_warn = 0.0
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:  # ruff:ignore[complex-structure]
         """
@@ -142,11 +150,39 @@ class OperaLogMiddleware(BaseHTTPMiddleware):
                     cost_time=elapsed,
                     opera_time=ctx.start_time,
                 )
-                await self.opera_log_queue.put(opera_log_in)
-                if settings.GRAFANA_METRICS_ENABLE:
-                    observe_queue_size(self.opera_log_queue, queue_name=self.opera_log_queue_name)
+                self.enqueue(opera_log_in)
 
         return response
+
+    @classmethod
+    def enqueue(cls, opera_log_in: CreateOperaLogParam) -> bool:
+        """把一条操作日志放进队列；队列满了就丢掉这一条，返回 False。
+
+        🔴 **不能 `await queue.put()`。** 队列满（入库持续失败，比如数据库挂了）时它会一直等，
+        业务请求就跟着挂住、不返回 —— 写日志拖垮了被记录的那个请求。实测（改之前的写法）：
+        `maxsize=1` 的满队列上 `await put()`，1 秒内没有返回。
+
+        丢的时候要让人知道：告警按 `_QUEUE_FULL_WARN_INTERVAL` 合并，带上这段时间丢了多少条，
+        不至于每个请求刷一行
+        """
+        try:
+            cls.opera_log_queue.put_nowait(opera_log_in)
+        except QueueFull:
+            cls._dropped_since_warn += 1
+            now = time.monotonic()
+            if now - cls._last_full_warn >= _QUEUE_FULL_WARN_INTERVAL:
+                log.warning(
+                    f'操作日志队列已满（{settings.OPERA_LOG_QUEUE_MAXSIZE} 条，入库跟不上），'
+                    f'已丢弃 {cls._dropped_since_warn} 条操作日志'
+                )
+                cls._dropped_since_warn = 0
+                cls._last_full_warn = now
+            if settings.GRAFANA_METRICS_ENABLE:
+                inc_queue_exception(queue_name=cls.opera_log_queue_name)
+            return False
+        if settings.GRAFANA_METRICS_ENABLE:
+            observe_queue_size(cls.opera_log_queue, queue_name=cls.opera_log_queue_name)
+        return True
 
     @staticmethod
     def client_gone(method: str, path: str) -> Response:
@@ -201,9 +237,19 @@ class OperaLogMiddleware(BaseHTTPMiddleware):
         # 请求体
         body_data = await request.body()
         if body_data and not is_form:
-            # 注意：非 json 数据默认使用 data 作为键
-            if 'application/json' not in content_types:
-                args['data'] = body_data.decode('utf-8', 'ignore') if isinstance(body_data, bytes) else str(body_data)
+            # `application/merge-patch+json` 这类 FastAPI 也按 JSON 解析（`subtype.endswith('+json')`），这里要认同一组
+            is_json = any(ct == 'application/json' or ct.endswith('+json') for ct in content_types)
+            if not is_json:
+                # 注意：非 json 数据默认使用 data 作为键
+                text = body_data.decode('utf-8', 'ignore') if isinstance(body_data, bytes) else str(body_data)
+                # 🔴 声明不是 JSON、内容却是 JSON 的（`text/plain` 发 `{"password": …}`）照样按字段打码：
+                # 路由层会把它 422 拒掉，但这个中间件在路由之前，原样记就是明文进日志（#283 评审）
+                try:
+                    parsed = json.loads(text)
+                except ValueError:
+                    args['data'] = text
+                else:
+                    args['json'] = self.desensitization(parsed)
             else:
                 # 🔴 请求体声明是 JSON、实际不是（截断 / 手写错了）时不能在这里炸：这个中间件在路由**之前**，
                 # 抛出去就是一个 500，路由层本该回的 422（`json_invalid`）永远轮不到。接住，交给路由层去拒。
@@ -218,10 +264,9 @@ class OperaLogMiddleware(BaseHTTPMiddleware):
                         '_message': '请求体不是合法 JSON，无法脱敏，未记录原文',
                     }
                 else:
-                    if isinstance(json_data, dict):
-                        args['json'] = self.desensitization(json_data)
-                    else:
-                        args['data'] = str(json_data)
+                    # 🔴 列表也要过脱敏：原来只有 dict 走这里，列表（批量保存参数配置之类）被 `str()` 成一段 Python repr
+                    # 记进 `data`，一个字符都不打码
+                    args['json'] = self.desensitization(json_data)
 
         if is_form:
             # 表单参数
@@ -302,9 +347,12 @@ class OperaLogMiddleware(BaseHTTPMiddleware):
             return args
 
         if isinstance(args, dict):
+            # 🔴 参数配置那种 `{"key": "EMAIL_PASSWORD", "value": "<授权码>"}`：要打码的字段就叫 `value`，
+            # 按字段名的名单永远认不出来，只能看同一行的键名（规则和前端参数配置页打码同一条）
+            secret_value = 'value' in args and is_secret_key_name(args.get('key'))
             return {
                 key: '[REDACTED]'
-                if key in settings.OPERA_LOG_REDACT_KEYS
+                if key in settings.OPERA_LOG_REDACT_KEYS or (secret_value and key == 'value')
                 else OperaLogMiddleware.desensitization(value, _depth + 1)
                 for key, value in args.items()
             }
@@ -413,6 +461,7 @@ class OperaLogMiddleware(BaseHTTPMiddleware):
     @classmethod
     async def consumer(cls) -> None:
         """操作日志消费者"""
+        cls.opera_log_stop_event.clear()
 
         async def bulk_create_opera_log(logs: list[CreateOperaLogParam]) -> None:
             """批量创建操作日志"""
@@ -429,4 +478,24 @@ class OperaLogMiddleware(BaseHTTPMiddleware):
             queue_name=cls.opera_log_queue_name,
             error_message='操作日志入库失败',
             item_name='日志',
+            stop_event=cls.opera_log_stop_event,
         )
+
+    @classmethod
+    async def stop_consumer(cls, task: asyncio.Task[None]) -> None:
+        """停掉消费者：先把队列里剩下的写完，超过 `OPERA_LOG_QUEUE_DRAIN_TIMEOUT` 才放弃。
+
+        原来是直接 `cancel()`，每次发版 / 重启都会丢掉消费者手里那一批（最多攒 60 秒），
+        见 `common/queue.py: batch_consume`
+        """
+        if task.done():
+            return
+        cls.opera_log_stop_event.set()
+        try:
+            # 超时时 wait_for 会顺带取消 task
+            await asyncio.wait_for(task, timeout=settings.OPERA_LOG_QUEUE_DRAIN_TIMEOUT)
+        except TimeoutError:
+            log.warning(
+                f'操作日志没能在 {settings.OPERA_LOG_QUEUE_DRAIN_TIMEOUT} 秒内全部入库，没写完的已丢弃'
+                f'（队列里还剩 {cls.opera_log_queue.qsize()} 条，不含正在写的那一批）'
+            )

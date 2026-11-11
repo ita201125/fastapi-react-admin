@@ -371,9 +371,9 @@ class Settings(BaseSettings):
 
     # 用户批量导入
     #
-    # 🔴 **默认密码放这里而不是 sys_config**（参数配置插件那张表）。那张表的值
-    # 会**原样显示在参数配置页**上，而且 `PUT /sys/configs` 的请求体会进操作日志
-    # （`value` 不在 `OPERA_LOG_REDACT_KEYS` 里）—— 放进去等于同时在两个地方公开它。
+    # 🔴 **默认密码放这里而不是 sys_config**（参数配置插件那张表）。那张表在库里是明文，
+    # 能读库 / 能导出参数配置的人都看得到；#283 之前 `PUT /sys/configs` 的请求体还原样进操作日志
+    # （现在键名像密钥的行会打码，`common/secret_keys.py`）—— 放进去等于多一处公开它。
     #
     # 🔴 **空串 = 关掉导入功能**，不是「用某个内置默认值」。没有一个内置值是安全的：
     # 它会跟着仓库一起公开，而每套部署都会照抄。
@@ -482,10 +482,21 @@ class Settings(BaseSettings):
         # （钉钉 access_token / 企微 key / 飞书 hook ID，拿到地址就能往群里发），加签密钥同理。字段名同样起成专用的
         'webhook_url',
         'sign_secret',
+        # 🔴 下面这几个原来都漏了（`tests/test_opera_log_redaction.py` 的守卫扫 schema 扫出来的）：
+        # 登录 / 刷新 / 二次验证的响应体里是访问令牌（开发库实测上百条明文）· 模型密钥的请求体字段叫 api_key ·
+        # 导入提交的一次性令牌 · AI 写操作的二次确认令牌
+        'access_token',
+        'refresh_token',
+        'api_key',
+        'import_token',
+        'token',
     ]
     OPERA_LOG_QUEUE_MAXSIZE: int = 100000
     OPERA_LOG_QUEUE_BATCH_CONSUME_SIZE: int = 100
     OPERA_LOG_QUEUE_TIMEOUT: int = 60  # 1 分钟
+    # 进程关闭时排空操作日志队列最多等多久（秒），超时剩下的丢弃并告警。
+    # ⚠️ 要比 `docker stop` 的宽限期（默认 10 秒，之后 SIGKILL）短，还得给关闭流程的其余步骤留余量
+    OPERA_LOG_QUEUE_DRAIN_TIMEOUT: int = 5
     OPERA_LOG_BODY_MAX_SIZE: int = 10240  # 10 KB
     # 响应体记录：只记 JSON 类响应，超限截断（避免把文件下载/大列表灌进日志表）
     OPERA_LOG_RESPONSE_MAX_SIZE: int = 10240  # 10 KB
@@ -494,6 +505,11 @@ class Settings(BaseSettings):
     # 数据变更记录（#260）保留天数。默认 180：《网络安全法》（2016 年版）第二十一条要求网络日志「留存不少于六个月」。
     # 参数配置「日志」组可覆盖；`maintenance.prune_logs` 每天按 created_time 分批删
     DATA_CHANGE_RETENTION_DAYS: int = 180
+    # 数据变更记录防篡改链的签名密钥（`common/data_change/chain.py`）。只放 .env，**不进库**：
+    # 拿到数据库权限的人改了记录、重算签名也对不上。留空 = 不加密钥的 SHA-256，只防「手滑直接改库」（校验结果会说明）。
+    # ⚠️ 设了就别换：换了之后旧记录用新密钥校验不了（校验会单独列出「换密钥之前签的」几行）。
+    # 生成：python -c "import os;print(os.urandom(32).hex())"
+    DATA_CHANGE_CHAIN_KEY: str = ''
     # 这些请求头会被打码 —— 它们要么是凭据，要么含会话信息
     OPERA_LOG_REDACT_HEADERS: list[str] = [
         'authorization',
