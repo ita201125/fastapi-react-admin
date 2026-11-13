@@ -10,12 +10,13 @@
 
 权限细到数据行 · 多页签真保状态 · 飞书式审批 · 不越权的 AI 助手 · S3 存储与断点续传 · Web / 桌面 / 移动三端
 
-[在线演示](https://fra.wubunan.com/sign-in) · [文档](https://yilecoding.github.io/fastapi-react-admin/) · [快速开始](#快速开始) · [功能一览](#功能一览) · [更新记录](https://github.com/yilecoding/fastapi-react-admin/releases)
+[在线演示](https://fra.wubunan.com/sign-in) · [文档](https://yilecoding.github.io/fastapi-react-admin/) · [DeepWiki 项目解析](https://deepwiki.com/yilecoding/fastapi-react-admin) · [快速开始](#快速开始) · [功能一览](#功能一览) · [更新记录](https://github.com/yilecoding/fastapi-react-admin/releases)
 
 [![Release](https://img.shields.io/github/v/release/yilecoding/fastapi-react-admin?style=flat-square)](https://github.com/yilecoding/fastapi-react-admin/releases)
 [![CI](https://github.com/yilecoding/fastapi-react-admin/actions/workflows/ci.yml/badge.svg)](https://github.com/yilecoding/fastapi-react-admin/actions/workflows/ci.yml)
 [![E2E 报告](https://img.shields.io/badge/E2E_报告-Playwright-2EAD33?style=flat-square&logo=playwright&logoColor=white)](https://yilecoding.github.io/fastapi-react-admin/e2e/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](./LICENSE)
+[![zread](https://img.shields.io/badge/Ask_Zread-_.svg?style=flat&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff)](https://zread.ai/yilecoding/fastapi-react-admin)
 
 </div>
 
@@ -174,6 +175,7 @@ pnpm dev                                                # 打开 http://127.0.0.
 | 想做什么 | 看这里 |
 |---|---|
 | 从零上手：快速开始、部署、写第一个业务模块、常见问题、版本升级 | [文档站](https://yilecoding.github.io/fastapi-react-admin/)（演示站上也有一份：[fra.wubunan.com/docs](https://fra.wubunan.com/docs/)） |
+| 借助 AI 理解项目结构和代码 | [DeepWiki](https://deepwiki.com/yilecoding/fastapi-react-admin) · [Zread](https://zread.ai/yilecoding/fastapi-react-admin) |
 | 本地开发、跑测试、提 PR、发版 | [CONTRIBUTING.md](./CONTRIBUTING.md) |
 | 了解工程约定和踩过的坑 | [CLAUDE.md](./CLAUDE.md) —— 按任务导航，40 多份模块分册，每条结论都带实测证据 |
 | 部署到服务器 | [deploy/README.md](./deploy/README.md) |
